@@ -134,6 +134,14 @@ func (t *handshakeTransport) readLoop() {
 		if err != nil {
 			t.readError = err
 			close(t.incoming)
+
+			if t.sentInitMsg != nil {
+				t.mu.Lock()
+				t.unblockWaiters()
+				t.writeError = err
+				t.mu.Unlock()
+			}
+
 			break
 		}
 		if p[0] == msgIgnore || p[0] == msgDebug {
@@ -176,11 +184,7 @@ func (t *handshakeTransport) readOnePacket() ([]byte, error) {
 		log.Printf("%s exited key exchange, err %v", t.id(), err)
 	}
 
-	// Unblock writers.
-	t.sentInitMsg = nil
-	t.sentInitPacket = nil
-	t.cond.Broadcast()
-	t.writtenSinceKex = 0
+	t.unblockWaiters()
 	t.mu.Unlock()
 
 	if err != nil {
@@ -189,6 +193,19 @@ func (t *handshakeTransport) readOnePacket() ([]byte, error) {
 
 	t.readSinceKex = 0
 	return []byte{msgNewKeys}, nil
+}
+
+// unblockWaiters unblocks all waiters waiting for a key exchange to complete.
+// t.mu must be held when calling this method.
+func (t *handshakeTransport) unblockWaiters() {
+	if debugHandshake {
+		log.Println("handshakeTransport:unblockWaiters")
+	}
+
+	t.sentInitMsg = nil
+	t.sentInitPacket = nil
+	t.cond.Broadcast()
+	t.writtenSinceKex = 0
 }
 
 // sendKexInit sends a key change message, and returns the message
@@ -260,6 +277,7 @@ func (t *handshakeTransport) writePacket(p []byte) error {
 		t.cond.Wait()
 	}
 	if t.writeError != nil {
+		t.mu.Unlock()
 		return t.writeError
 	}
 	t.writtenSinceKex += uint64(len(p))
